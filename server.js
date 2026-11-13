@@ -92,7 +92,7 @@ http.createServer((req, res) => {
     console.log(`${new Date().toISOString()} ${req.method} ${req.url} -> ${status}${extra ? " | " + extra : ""}`);
 
   if (path === "/health") { res.writeHead(200); res.end("ok"); return log(200); }
-  if (path !== "/mcp") { res.writeHead(404); res.end(); return log(404); }
+  if (path !== "/mcp" && path !== "") { res.writeHead(404); res.end(); return log(404); }
 
   const key = getKey(req);
   if (key !== API_KEY) {
