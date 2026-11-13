@@ -1,8 +1,8 @@
-// server.js - Mock "Optus Network Inventory" MCP server
+// server.js - Mock "Optus Network Inventory" MCP server (with request logging)
 const http = require("http");
 
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || "change-me"; // accepts X-API-Key or Authorization: Bearer <key>
+const API_KEY = (process.env.API_KEY || "change-me").trim();
 
 const ASSETS = [
   {
@@ -17,7 +17,7 @@ const ASSETS = [
     service_id: "SVC-MLG-SDWAN-0042",
     last_updated: "2024-11-02T03:15:00Z",
     source_system: "Optus Network Inventory (external, non-ServiceNow)",
-    aliases_seen_elsewhere: [] // intentionally empty: the agent must infer the match
+    aliases_seen_elsewhere: []
   }
 ];
 
@@ -29,10 +29,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        query: {
-          type: "string",
-          description: "Asset ID, link name, customer name, or site pair (e.g. 'Sydney Melbourne')"
-        }
+        query: { type: "string", description: "Asset ID, link name, customer name, or site pair (e.g. 'Sydney Melbourne')" }
       },
       required: ["query"]
     },
@@ -45,8 +42,7 @@ function findAssets(q) {
   const terms = n.split(/\s+/).filter(Boolean);
   return ASSETS.filter(a => {
     const hay = JSON.stringify(a).toLowerCase().replace(/[^a-z0-9]/g, " ");
-    return terms.some(t => t.length > 2 && hay.includes(t)) ||
-           (n.includes("syd") && n.includes("mel"));
+    return terms.some(t => t.length > 2 && hay.includes(t)) || (n.includes("syd") && n.includes("mel"));
   });
 }
 
@@ -66,6 +62,10 @@ function handle(msg) {
       return ok({});
     case "tools/list":
       return ok({ tools: TOOLS });
+    case "prompts/list":
+      return ok({ prompts: [] });
+    case "resources/list":
+      return ok({ resources: [] });
     case "tools/call": {
       if (params?.name !== "lookup_network_asset") return err(-32602, "Unknown tool");
       const matches = findAssets(params.arguments?.query);
@@ -80,25 +80,43 @@ function handle(msg) {
   }
 }
 
-http.createServer((req, res) => {
-  if (req.url === "/health") { res.writeHead(200); return res.end("ok"); }
-  if (req.url !== "/mcp") { res.writeHead(404); return res.end(); }
+function getKey(req) {
+  const h = req.headers;
+  const bearer = (h.authorization || "").replace(/^Bearer\s+/i, "");
+  return String(h["x-api-key"] || h["api-key"] || h["apikey"] || bearer || "").trim();
+}
 
-  const key = req.headers["x-api-key"] || (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+http.createServer((req, res) => {
+  const path = (req.url || "").split("?")[0].replace(/\/+$/, "");
+  const log = (status, extra) =>
+    console.log(`${new Date().toISOString()} ${req.method} ${req.url} -> ${status}${extra ? " | " + extra : ""}`);
+
+  if (path === "/health") { res.writeHead(200); res.end("ok"); return log(200); }
+  if (path !== "/mcp") { res.writeHead(404); res.end(); return log(404); }
+
+  const key = getKey(req);
   if (key !== API_KEY) {
-    res.writeHead(401); return res.end("Unauthorized");
+    res.writeHead(401); res.end("Unauthorized");
+    return log(401, `header names: ${Object.keys(req.headers).join(",")} | key length received ${key.length}, expected ${API_KEY.length}`);
   }
-  if (req.method !== "POST") { res.writeHead(405, { Allow: "POST" }); return res.end(); }
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" }); res.end();
+    return log(405, `accept=${req.headers.accept || ""}`);
+  }
 
   let body = "";
   req.on("data", c => (body += c));
   req.on("end", () => {
     let msg;
-    try { msg = JSON.parse(body); } catch { res.writeHead(400); return res.end(); }
+    try { msg = JSON.parse(body); } catch { res.writeHead(400); res.end(); return log(400, "bad JSON"); }
 
-    if (msg.id === undefined) { res.writeHead(202); return res.end(); } // notifications
+    const msgs = Array.isArray(msg) ? msg : [msg];
+    const names = msgs.map(m => m.method + (m.method === "initialize" ? `(v${m.params && m.params.protocolVersion})` : "")).join(",");
+    const replies = msgs.filter(m => m.id !== undefined).map(handle);
 
+    if (replies.length === 0) { res.writeHead(202); res.end(); return log(202, `rpc=${names}`); }
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(handle(msg)));
+    res.end(JSON.stringify(Array.isArray(msg) ? replies : replies[0]));
+    log(200, `rpc=${names}`);
   });
 }).listen(PORT, () => console.log(`MCP mock listening on ${PORT}`));
